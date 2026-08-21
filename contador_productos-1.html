@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Contador de códigos</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#f3f4f6;color:#111827}
+.app{max-width:700px;margin:auto;padding:16px}.card{background:white;border-radius:18px;padding:16px;margin-bottom:14px;box-shadow:0 3px 14px #0001}
+h1{margin:0 0 4px;font-size:25px}.muted{color:#6b7280;font-size:14px}
+button{border:0;border-radius:12px;padding:13px 15px;font-weight:700;font-size:15px;cursor:pointer}
+.primary{background:#111827;color:white}.danger{background:#fee2e2;color:#991b1b}.secondary{background:#e5e7eb;color:#111827}
+.row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1}
+#reader{width:100%;overflow:hidden;border-radius:14px;background:#111;min-height:0}#reader video{width:100%!important}
+input{width:100%;padding:13px;border:1px solid #d1d5db;border-radius:11px;font-size:16px}
+.stats{display:flex;gap:10px}.stat{flex:1;background:#f9fafb;border-radius:12px;padding:12px}.num{font-size:24px;font-weight:800}
+table{width:100%;border-collapse:collapse;margin-top:8px}th,td{text-align:left;padding:11px 7px;border-bottom:1px solid #e5e7eb}th:last-child,td:last-child{text-align:right}
+.empty{text-align:center;padding:25px;color:#6b7280}.status{margin-top:9px;font-size:14px;color:#374151}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="card">
+    <h1>📦 Contador de productos</h1>
+    <div class="muted">Escanea códigos y acumula automáticamente las cantidades.</div>
+  </div>
+
+  <div class="card">
+    <div id="reader"></div>
+    <div class="row" style="margin-top:10px">
+      <button class="primary" id="start">📷 Iniciar cámara</button>
+      <button class="secondary" id="stop">⏹ Detener</button>
+    </div>
+    <div class="status" id="status">Cámara detenida.</div>
+  </div>
+
+  <div class="card">
+    <input id="manual" inputmode="numeric" placeholder="Escribe un código manualmente">
+    <button class="primary" id="add" style="width:100%;margin-top:8px">➕ Agregar código</button>
+  </div>
+
+  <div class="card">
+    <div class="stats">
+      <div class="stat"><div class="muted">Códigos</div><div class="num" id="codes">0</div></div>
+      <div class="stat"><div class="muted">Unidades</div><div class="num" id="units">0</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <input id="search" placeholder="🔎 Buscar código">
+    <table>
+      <thead><tr><th>Código</th><th>Cantidad</th></tr></thead>
+      <tbody id="list"></tbody>
+    </table>
+    <div class="empty" id="empty">Todavía no hay códigos.</div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <button class="secondary" id="undo">↩️ Deshacer</button>
+      <button class="secondary" id="txt">📄 TXT</button>
+      <button class="secondary" id="csv">📊 CSV</button>
+      <button class="danger" id="clear">🗑️ Limpiar</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/html5-qrcode"></script>
+<script>
+/* Compatibilidad para aperturas desde archivos: algunos navegadores móviles
+   bloquean getUserMedia en file://. Si el navegador lo permite, el lector funciona.
+   Para Android Chrome, la forma más simple sin instalar nada es abrir el HTML
+   mediante una vista previa/servidor HTTPS del gestor de archivos o compartirlo
+   con una página HTTPS. */
+</script>
+<script>
+const data = new Map();
+const canNativeBarcode = "BarcodeDetector" in window;
+try {
+  const saved = JSON.parse(localStorage.getItem("conteo_productos") || "[]");
+  saved.forEach(([c,n]) => data.set(c,n));
+} catch {}
+function persist(){ localStorage.setItem("conteo_productos", JSON.stringify([...data])); }
+let history = [];
+let scanner = null;
+let running = false;
+let lastCode = "", lastTime = 0;
+
+const $ = id => document.getElementById(id);
+function addCode(code){
+  code = String(code || "").trim();
+  if(!code) return;
+  data.set(code,(data.get(code)||0)+1);
+  history.push(code);
+  persist();
+  $("manual").value="";
+  render();
+  navigator.vibrate?.(80);
+  $("status").textContent = "✓ Código registrado: " + code;
+}
+function render(){
+  const q=$("search").value.trim().toLowerCase();
+  const rows=[...data.entries()].filter(([c])=>c.toLowerCase().includes(q));
+  $("list").innerHTML=rows.map(([c,n])=>`<tr><td>${esc(c)}</td><td>${n}</td></tr>`).join("");
+  $("empty").style.display=rows.length?"none":"block";
+  $("codes").textContent=data.size;
+  $("units").textContent=[...data.values()].reduce((a,b)=>a+b,0);
+}
+function esc(s){return s.replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
+
+$("start").onclick=async()=>{
+  if(running)return;
+  if(location.protocol==="file:"){
+    $("status").textContent="⚠️ Este navegador puede bloquear la cámara al abrir un HTML directamente. Si ocurre, usa la opción 'Abrir en navegador' de tu visor de archivos o el enlace HTTPS.";
+  }
+  try{
+    scanner = scanner || new Html5Qrcode("reader");
+    await scanner.start(
+      {facingMode:"environment"},
+      {fps:12,qrbox:{width:260,height:140}},
+      code=>{
+        const now=Date.now();
+        if(code===lastCode && now-lastTime<1200)return;
+        lastCode=code;lastTime=now;
+        addCode(code);
+      },
+      ()=>{}
+    );
+    running=true;
+    $("status").textContent="📷 Cámara activa. Apunta al código de barras.";
+  }catch(e){
+    $("status").textContent="No se pudo abrir la cámara. Usa HTTPS/localhost y permite el acceso a la cámara.";
+  }
+};
+$("stop").onclick=async()=>{
+  if(scanner && running){try{await scanner.stop()}catch{}}
+  running=false;$("status").textContent="Cámara detenida.";
+};
+$("add").onclick=()=>addCode($("manual").value);
+$("manual").addEventListener("keydown",e=>{if(e.key==="Enter")addCode($("manual").value)});
+$("search").oninput=render;
+$("undo").onclick=()=>{
+  const c=history.pop(); if(!c)return;
+  const n=data.get(c)||0;
+  if(n<=1)data.delete(c);else data.set(c,n-1);
+  persist();
+  render();
+};
+$("clear").onclick=()=>{
+  if(!data.size)return;
+  if(confirm("¿Eliminar toda la lista?")){data.clear();history=[];render();}
+};
+function download(content,name,type){
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([content],{type}));
+  a.download=name;a.click();URL.revokeObjectURL(a.href);
+}
+$("txt").onclick=()=>{
+  const lines=[...data.entries()].map(([c,n])=>`${c}\t${n}`);
+  download(lines.join("\n"),"conteo-productos.txt","text/plain;charset=utf-8");
+};
+$("csv").onclick=()=>{
+  const lines=["Codigo,Cantidad",...[...data.entries()].map(([c,n])=>`"${c.replaceAll('"','""')}",${n}`)];
+  download(lines.join("\n"),"conteo-productos.csv","text/csv;charset=utf-8");
+};
+render();
+</script>
+</body>
+</html>
